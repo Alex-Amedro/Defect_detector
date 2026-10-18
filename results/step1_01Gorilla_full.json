@@ -1,0 +1,26 @@
+{
+  "n_images": 259,
+  "n_good": 20,
+  "n_anomalous": 239,
+  "n_anomalous_with_empty_mask_after_resize": 5,
+  "image_auroc": 0.9366108786610878,
+  "pixel_auroc": 0.9957579330892102,
+  "aupro_fpr_0.3": 0.9477730188062221,
+  "image_auroc_by_type": {
+    "Burrs": 0.9164179104477611,
+    "Missing": 0.9704379562043796,
+    "Stains": 0.8428571428571429
+  },
+  "image_auroc_ci95_bootstrap": [
+    0.8922594142259415,
+    0.9694717573221757
+  ],
+  "classname": "01Gorilla",
+  "tag": "full",
+  "refine_steps_k": 175,
+  "pose_seconds_per_image_total": 13.55,
+  "refine_ms_per_image_median": 3960.6,
+  "render_max_before_clamp_gt_1": 259,
+  "gpu": "NVIDIA GeForce RTX 5070 Laptop GPU",
+  "torch": "2.11.0+cu128"
+}

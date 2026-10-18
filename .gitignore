@@ -1,0 +1,18 @@
+# data, models and caches (large, and MAD is CC BY-NC-SA: never redistributed)
+data/
+*.ply
+*.npz
+*.pth
+*.ckpt
+__pycache__/
+
+# private working notes
+Context.md
+CLAUDE.md
+.claude/
+docs/decisions.md
+docs/datasets.md
+docs/related_work.md
+docs/feasibility.md
+docs/capture_protocol.md
+results/media/step1_01Gorilla_turntable.mp4
