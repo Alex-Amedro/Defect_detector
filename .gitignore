@@ -1,0 +1,29 @@
+# data, models and caches (large, and MAD is CC BY-NC-SA: never redistributed)
+data/
+*.ply
+*.npz
+*.pth
+*.ckpt
+*.bundle
+__pycache__/
+
+# results: the numbers live in the README, only the images it shows are published
+results/*.json
+results/figures/*
+!results/figures/step1_01Gorilla_full_heatmaps.png
+!results/figures/step3_fusion_missing_good.png
+!results/figures/real_photo_model.jpg
+results/media/*
+!results/media/01Gorilla_defect_photo.png
+!results/media/01Gorilla_healthy_model_same_angle.png
+!results/media/01Gorilla_defect_3d_turn.gif
+
+# private working notes and tool folders
+cours*.md
+Context.md
+CLAUDE.md
+.claude/
+docs/
+.vscode/
+.idea/
+*.log
