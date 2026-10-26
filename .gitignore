@@ -6,13 +6,16 @@ data/
 *.ckpt
 __pycache__/
 
+# results: the numbers live in the README, only three images are published
+results/*.json
+results/figures/*
+!results/figures/step1_01Gorilla_full_heatmaps.png
+!results/figures/real_detect_Bird_seg.png
+results/media/*.mp4
+
 # private working notes
+cours*.md
 Context.md
 CLAUDE.md
 .claude/
-docs/decisions.md
-docs/datasets.md
-docs/related_work.md
-docs/feasibility.md
-docs/capture_protocol.md
-results/media/step1_01Gorilla_turntable.mp4
+docs/

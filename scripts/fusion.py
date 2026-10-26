@@ -46,6 +46,24 @@ def backproject(depth, alpha, cam, fov, size, min_alpha=0.9):
     return (cam_points - T) @ R.T, alpha > min_alpha  # row-vector form of R @ (camera point - T)
 
 
+def backproject_crop(depth, alpha, cam, intrinsics, box, size, min_alpha=0.9):
+    """Like backproject, for a size x size window cut out of a larger photo.
+
+    intrinsics = (fx, fy, cx, cy) of the full photo; box = (x0, y0, x1, y1) of the window in photo pixels.
+    Window pixels that fall outside the photo are invalid."""
+    fx, fy, cx, cy = intrinsics
+    height, width = depth.shape
+    x0, y0, x1, y1 = box
+    steps = (torch.arange(size, device="cuda") + 0.5) / size
+    u, v = x0 + steps * (x1 - x0), y0 + steps * (y1 - y0)  # photo column / row of each window column / row
+    ui, vi = u.floor().long().clamp(0, width - 1), v.floor().long().clamp(0, height - 1)
+    d, a = depth[vi][:, ui], alpha[vi][:, ui]
+    inside = ((v >= 0) & (v < height))[:, None] & ((u >= 0) & (u < width))[None, :]
+    cam_points = torch.stack([(u[None, :] - cx) / fx * d, (v[:, None] - cy) / fy * d, d], dim=-1)
+    R, T = _pose(cam)
+    return (cam_points - T) @ R.T, (a > min_alpha) & inside
+
+
 def project(points, cam, fov, size):
     """World points (N, 3) to pixel coordinates (u, v) and depth z in `cam`."""
     R, T = _pose(cam)
@@ -65,6 +83,7 @@ class DefectGrid:
         shape = (self.n,) * 3
         self.seen = torch.zeros(shape, device="cuda")  # views that saw the surface inside this voxel
         self.hits = torch.zeros(shape, device="cuda")  # views whose anomaly score was above the threshold there
+        self.score_sum = torch.zeros(shape, device="cuda")  # sum over views of the best score inside the voxel
 
     def add_view(self, points, scores, threshold):
         """points (N, 3) visible surface points of one view, scores (N,) anomaly score of the matching pixels."""
@@ -77,6 +96,19 @@ class DefectGrid:
         touched[flat] = True
         self.seen += touched.view_as(self.seen)
         self.hits += (touched & (best > threshold)).view_as(self.hits)
+        self.score_sum += torch.where(touched, best, torch.zeros_like(best)).view_as(self.score_sum)
+
+    def mean_score(self):
+        """Average over the views that saw each voxel: a reflection seen by one view is diluted by the others."""
+        return self.score_sum / self.seen.clamp_min(1)
+
+    def lookup(self, field, points):
+        """Read a (n, n, n) field at 3D points; points outside the grid get 0."""
+        ijk = torch.floor((points - self.origin) / self.voxel).long()
+        inside = ((ijk >= 0) & (ijk < self.n)).all(dim=1)
+        out = torch.zeros(len(points), device="cuda")
+        out[inside] = field[ijk[inside, 0], ijk[inside, 1], ijk[inside, 2]]
+        return out
 
     def confirmed(self, min_views, min_ratio):
         """Voxels flagged by at least `min_views` views and by at least `min_ratio` of the views that saw them."""

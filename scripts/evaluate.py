@@ -31,6 +31,8 @@ parser.add_argument("--data", default=str(Path.home() / "data" / "MAD-Sim_3dgs")
 parser.add_argument("--seed", type=int, default=0)
 parser.add_argument("--k", type=int, default=175, help="pose refinement steps (SplatPose default)")
 parser.add_argument("--chunk", type=int, default=32, help="max test images per cached chunk")
+parser.add_argument("--types", default="", help="comma-separated test folders to keep, e.g. good,Burrs (default: all)")
+parser.add_argument("--per-type", type=int, default=0, help="keep only the first N images of each type (quick tests)")
 parser.add_argument("--repo", default=str(Path.home() / "work" / "SplatPose"))
 parser.add_argument("--cache", default=str(Path.home() / "data" / "cache"))
 parser.add_argument("--results", default=str(Path(__file__).resolve().parents[1] / "results"))
@@ -39,29 +41,30 @@ cli = parser.parse_args()
 sys.path.insert(0, cli.repo)
 os.chdir(cli.repo)  # upstream code uses paths relative to its repo root
 
+sys.path.insert(1, str(Path(__file__).resolve().parent))
+
 import numpy as np  # noqa: E402
 import torch  # noqa: E402
-import yaml  # noqa: E402
-from easydict import EasyDict  # noqa: E402
 from PIL import Image  # noqa: E402
-from scipy.ndimage import gaussian_filter  # noqa: E402
 from sklearn.metrics import roc_auc_score  # noqa: E402
-from torchvision import transforms  # noqa: E402
+from scoring import SIZE as SCORE_SIZE, anomaly_maps  # noqa: E402
 
 CLASS = cli.classname
 RAW = Path(cli.raw).expanduser() / CLASS
 MODEL_DIR = os.path.join(cli.data, f"results_step0_{cli.seed}", CLASS)
 CACHE = Path(cli.cache) / CLASS / cli.tag
 CACHE.mkdir(parents=True, exist_ok=True)
-SCORE_SIZE = 224  # resolution of the anomaly maps (same as the paper's evaluation)
 
 
 def list_test_images():
     """All test images as (defect_type, filename), in the order the upstream dataset class reads them."""
+    keep = set(cli.types.split(",")) if cli.types else None
     items = []
     for dtype in sorted(os.listdir(RAW / "test")):
-        for name in sorted(os.listdir(RAW / "test" / dtype)):
-            items.append((dtype, name))
+        if keep and dtype not in keep:
+            continue
+        names = sorted(os.listdir(RAW / "test" / dtype))
+        items += [(dtype, n) for n in (names[:cli.per_type] if cli.per_type else names)]
     return items
 
 
@@ -86,9 +89,53 @@ def to_u8(x):
     return (x.clamp(0, 1) * 255).round().to(torch.uint8).numpy()
 
 
+def record_poses():
+    """Hook two upstream helpers so the final pose of every image can be recovered.
+
+    Upstream keeps the camera at the coarse pose and moves the gaussians by a rigid motion (R_s, T_s).
+    Seen from the camera: x_cam = R0^T (R_s^T x + T_s) + T0, i.e. an equivalent camera with
+    R = R_s R0 and T = R0^T T_s + T0 on the untouched gaussians (Gaussian Splatting convention, see fusion.py).
+    """
+    import pose_estimation
+    coarse, transforms_ = [], []
+    retrieval = pose_estimation.pose_retrieval_loftr
+    transf_class = pose_estimation.camera_transf
+
+    def retrieval_hook(*args, **kwargs):
+        c2w = retrieval(*args, **kwargs)
+        coarse.append(np.array(c2w))
+        return c2w
+
+    class TransfHook(transf_class):
+        def __init__(self):
+            super().__init__()
+            transforms_.append(self)
+
+    pose_estimation.pose_retrieval_loftr = retrieval_hook
+    pose_estimation.camera_transf = TransfHook
+
+    def final_poses():
+        R_out, T_out = [], []
+        for c2w, transf in zip(coarse, transforms_):
+            c2w = c2w.copy()
+            c2w[:3, 1:3] *= -1  # Blender axes -> COLMAP axes, same two lines as upstream
+            w2c = np.linalg.inv(c2w)
+            R0, T0 = w2c[:3, :3].T, w2c[:3, 3]
+            with torch.no_grad():
+                Rs, Ts, _ = transf()
+            Rs, Ts = Rs.cpu().numpy().astype(np.float64), Ts.cpu().numpy().astype(np.float64)
+            R_out.append(Rs @ R0)
+            T_out.append(R0.T @ Ts + T0)
+        coarse.clear(), transforms_.clear()
+        return np.stack(R_out), np.stack(T_out)
+
+    return final_poses
+
+
 def compute_poses():
     """Stage 1+2 on every chunk not yet cached. Returns the list of chunk files."""
     from pose_estimation import main_pose_estimation
+    final_poses = record_poses()
 
     items = list_test_images()
     n_chunks = -(-len(items) // cli.chunk)
@@ -110,8 +157,11 @@ def compute_poses():
         photos, renders, _, masks, times = main_pose_estimation(
             cur_class=CLASS, model_dir_location=MODEL_DIR, k=cli.k, verbose=False, data_dir=data_dir)
         wall = time.perf_counter() - t0
+        pose_R, pose_T = final_poses()
         np.savez(
             path,
+            pose_R=pose_R,
+            pose_T=pose_T,
             photo=np.stack([to_u8(p) for p in photos]),
             render=np.stack([r.clamp(0, 1).numpy().astype(np.float16) for r in renders]),
             raw_render_max=np.array([float(r.max()) for r in renders]),
@@ -129,31 +179,6 @@ def load_chunks(files):
     parts = [dict(np.load(f)) for f in files]
     return {k: np.concatenate([p[k] for p in parts]) for k in parts[0] if k != "wall_s"}, \
         float(sum(p["wall_s"][0] for p in parts))
-
-
-def anomaly_maps(photo, render):
-    """Feature-difference maps, same recipe as the SplatPose / PAD evaluation code."""
-    from utils_pose_est import ModelHelper, update_config
-    with open("PAD_utils/config_effnet.yaml") as f:
-        cfg = update_config(EasyDict(yaml.load(f, Loader=yaml.FullLoader)))
-    model = ModelHelper(cfg.net).eval().cuda()
-    mse = torch.nn.MSELoss(reduction="none")
-    tf = transforms.Compose([
-        transforms.ToPILImage(), transforms.Resize(SCORE_SIZE), transforms.ToTensor(),
-        transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])])
-    maps = []
-    with torch.no_grad():
-        for p, r in zip(photo, render):
-            ref = tf(torch.from_numpy((r.astype(np.float32).clip(0, 1) * 255).round().astype(np.uint8))).unsqueeze(0).cuda()
-            rgb = tf(torch.from_numpy(p)).unsqueeze(0).cuda()
-            f_ref, f_rgb = model(ref), model(rgb)
-            score = mse(ref, rgb).sum(1, keepdim=True)
-            for a, b in zip(f_ref, f_rgb):
-                score += torch.nn.functional.interpolate(
-                    mse(a, b).sum(1, keepdim=True), size=SCORE_SIZE, mode="bilinear", align_corners=False)
-            maps.append(gaussian_filter(score.squeeze().cpu().numpy(), sigma=4))
-    maps = np.stack(maps)
-    return (maps - maps.min()) / (maps.max() - maps.min())  # one global min-max over the whole test set
 
 
 def resize_masks(masks):
@@ -234,6 +259,7 @@ if __name__ == "__main__":
     data, pose_wall_s = load_chunks(files)
     torch.cuda.empty_cache()
     maps = anomaly_maps(data["photo"], data["render"])
+    np.save(CACHE / "maps.npy", maps.astype(np.float16))  # same order as the chunk files, used by fusion_experiment.py
     gt = resize_masks(data["mask"])
     res = metrics(maps, gt, data["dtype"])
     res.update({
@@ -244,6 +270,7 @@ if __name__ == "__main__":
         "gpu": torch.cuda.get_device_name(0), "torch": torch.__version__,
     })
     out = Path(cli.results)
+    out.mkdir(parents=True, exist_ok=True)
     (out / f"step1_{CLASS}_{cli.tag}.json").write_text(json.dumps(res, indent=2))
     heatmap_figure(data, maps, gt, out / "figures" / f"step1_{CLASS}_{cli.tag}_heatmaps.png")
     print(json.dumps(res, indent=2))

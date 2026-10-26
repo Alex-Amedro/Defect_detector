@@ -20,6 +20,11 @@ parser.add_argument("--iterations", type=int, default=30000)
 parser.add_argument("--seed", type=int, default=0)
 parser.add_argument("--repo", default=str(Path.home() / "work" / "SplatPose"))
 parser.add_argument("--data", default=str(Path.home() / "data" / "MAD-Sim_3dgs"))
+parser.add_argument("--source", help="scene folder (default: <data>/<classname>)")
+parser.add_argument("--model-dir", help="where to write the splat (default: next to the data)")
+parser.add_argument("--real", action="store_true",
+                    help="real photos with COLMAP poses: colour depends on the viewing angle, every 8th photo held out")
+parser.add_argument("--white", action="store_true", help="with --real: photos are on a white background (object only)")
 parser.add_argument("--results", default=str(Path(__file__).resolve().parents[1] / "results"))
 cli = parser.parse_args()
 
@@ -32,13 +37,15 @@ from gaussian_splatting.train import (  # noqa: E402
     ArgumentParser, ModelParams, OptimizationParams, PipelineParams, safe_state, training,
 )
 
-source = os.path.join(cli.data, cli.classname)
-model_dir = os.path.join(cli.data, f"results_step0_{cli.seed}", cli.classname)
+source = cli.source or os.path.join(cli.data, cli.classname)
+model_dir = cli.model_dir or os.path.join(cli.data, f"results_step0_{cli.seed}", cli.classname)
 os.makedirs(model_dir, exist_ok=True)
 
-# Same flags as SplatPose: white background, hold out test cameras, grey-level colours (sh_degree 0).
-argv = ["-w", "--eval", "-s", source, "-m", model_dir,
-        "--iterations", str(cli.iterations), "--sh_degree", "0"]
+# MAD-Sim: same flags as SplatPose (white background, hold out test cameras, one colour per gaussian).
+# Real photos: default Gaussian Splatting settings (view-dependent colour, every 8th photo held out).
+flags = (["--eval", "--sh_degree", "3"] + (["-w"] if cli.white else [])) if cli.real else ["-w", "--eval", "--sh_degree", "0"]
+argv = flags + ["-s", source, "-m", model_dir, "--iterations", str(cli.iterations),
+                "--position_lr_max_steps", str(cli.iterations)]  # the position step must reach its end value too
 p = ArgumentParser()
 lp, op, pp = ModelParams(p), OptimizationParams(p), PipelineParams(p)
 p.add_argument("--debug_from", type=int, default=-1)
